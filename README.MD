@@ -1,22 +1,22 @@
 # Customer Genesys Cloud Export
 
-Reusable Genesys Cloud backup/export project using Terraform, Archy, and PowerShell.
+Reusable Genesys Cloud configuration export and backup project using Terraform and PowerShell.
 
 ## Purpose
 
-`run-export.ps1` is the single entry point for exporting Genesys Cloud configuration and Architect flows, validating the result, and creating an immutable timestamped backup.
+`run-export.ps1` is the single entry point for exporting Genesys Cloud configuration, validating the exported files, and creating an immutable timestamped backup.
+
+Terraform exports Architect flows directly as YAML. Archy is not required.
 
 The process is:
 
-1. Validate prerequisites.
-2. Clean the working Terraform and Archy export directories.
-3. Run the Terraform export.
-4. Read the Terraform `genesyscloud_flow` export to discover Architect flows.
-5. Export supported Architect flows with Archy.
-6. Validate the working exports.
-7. Create a timestamped backup.
-8. Validate the backup.
-9. Write `export-metadata.json`.
+1. Validate the Terraform executable and project directories.
+2. Clean the working Terraform export directory.
+3. Run Terraform initialisation and export.
+4. Validate the Terraform export and identify generated YAML files.
+5. Create a timestamped backup with exported files copied directly into the backup directory.
+6. Compare source and backup file manifests using SHA-256 hashes.
+7. Write `export-metadata.json`.
 
 Existing timestamped backups are not modified or deleted by a subsequent run.
 
@@ -32,92 +32,50 @@ customer-genesys-cloud-export/
 │   ├── terraform.tfvars
 │   ├── oauth.auto.tfvars
 │   ├── modules/
-│   └── export/
-├── archy/
-│   ├── config/
-│   │   └── options.yaml
-│   ├── export/
-│   └── archy-home/
+│   └── export/                 # Working export; recreated on each run
 ├── tools/
-│   ├── terraform/
-│   │   └── terraform.exe
-│   └── archy/
-│       └── archy.exe
+│   └── terraform/
+│       └── terraform.exe
 └── backups/
     └── YYYYMMDD-HHmmss/
-        ├── terraform/
-        ├── archy/
+        ├── ... exported files and directories ...
         └── export-metadata.json
 ```
 
-Terraform owns `terraform/export/`. Archy owns `archy/export/`. PowerShell owns the backup lifecycle.
+Terraform owns the working `terraform/export/` directory. PowerShell manages the export run, backup lifecycle, hash verification, and metadata.
 
 ## Prerequisites
 
-- Windows PowerShell.
-- Customer Genesys Cloud OAuth client.
-- Required OAuth permissions.
-- Bundled Terraform executable under `tools/terraform/terraform.exe`.
-- Bundled Archy executable under `tools/archy/archy.exe`.
-- Customer-specific Terraform configuration.
+- Windows PowerShell 5.1 or later.
+- A Genesys Cloud OAuth client with the required read permissions.
+- Terraform executable at `tools/terraform/terraform.exe`.
+
 
 ## OAuth Configuration
 
-**The OAuth credentials must be configured in two places.**
-
-### Archy
-
-Update:
-
-```text
-archy/config/options.yaml
-```
-
-with the customer's:
-
-- Client ID
-- Client Secret
-
-### Terraform
-
-Update:
+Configure the customer OAuth credentials in:
 
 ```text
 terraform/oauth.auto.tfvars
 ```
 
-with the customer's:
+Supply the customer-specific values required by the Terraform configuration, including the OAuth Client ID and Client Secret.
 
-- Client ID
-- Client Secret
+Treat this file as secret-bearing configuration. Do not commit customer credentials to source control. The repository `.gitignore` should exclude `terraform/oauth.auto.tfvars`.
 
-Updating one file does **not** update the other. Both must be configured for the complete export process to work.
+## OAuth Role and Permissions
 
-Treat both files as secret-bearing configuration and do not commit customer credentials to source control.
-
-## OAuth Role
-
-The supplied Terraform role export defines:
+The supplied Terraform role export defines the role:
 
 ```text
-NTT-backup-Read-Only-Access
+GC-backup-Read-Only-Access
 ```
 
-Description:
-
-```text
-Used for Terraform and Archy backup processes
-```
-
-The supplied role is read-only and uses `view` permissions.
-
-The reference role export is:
+The role is intended for read-only backup access and uses `view` permissions. The reference role export is:
 
 ```text
 genesyscloud_auth_role.tf.json
 ```
-
-### Permissions
 
 The supplied role contains these permissions:
 
@@ -150,57 +108,37 @@ The supplied role contains these permissions:
 - `scripter.publishedScript` — `view`
 - `scripter.script` — `view`
 
-These permissions cover the resources required by the Terraform and Archy backup processes represented by the supplied role export.
+Review the permissions against the resources enabled in the customer-specific Terraform configuration. The permissions listed above reflect the supplied role export; this README does not assert that they are sufficient for every possible resource configuration.
 
 ## Running the Export
 
-From the project root:
+From the project root, run:
 
 ```powershell
 .\run-export.ps1
 ```
 
-The script handles the complete export and backup workflow.
+The script performs Terraform initialisation and export, validates the output, creates a timestamped backup, verifies file integrity, and writes metadata.
 
 ## Terraform Export
 
-Terraform is the source of truth for the Genesys Cloud configuration export.
+Terraform is responsible for exporting Genesys Cloud configuration, including Architect flows as YAML.
 
-Working export:
+The working export directory is:
 
 ```text
 terraform/export/
 ```
 
-The Architect flow resource export is:
+Ensure the Terraform export configuration sets:
 
-```text
-terraform/export/flow/genesyscloud_flow.tf.json
+```hcl
+use_legacy_architect_flow_exporter = false
 ```
 
-The script reads this JSON to discover the actual Genesys Cloud flow names and types rather than maintaining a hard-coded list of flow names.
+The exact location of this setting depends on the Terraform configuration used by the project. Confirm it is applied to the export configuration before running the script.
 
-## Archy Export
-
-Archy writes Architect flow YAML files to:
-
-```text
-archy/export/
-```
-
-Supported flow types are controlled by `$ArchySupportedFlowTypes` in `run-export.ps1`.
-
-Current supported types in the supplied script:
-
-- `inboundcall`
-- `bot`
-- `commonmodule`
-
-The actual Genesys flow name is passed to Archy unchanged. Generated YAML filenames are prefixed with the flow type, for example:
-
-```text
-inboundcall_AlexL Customer Support_v1-0.yaml
-```
+The script validates that the working export directory exists and contains files. It also reports the number of YAML files found. It does not use Archy or separately discover and export individual flows.
 
 ## Backups
 
@@ -214,101 +152,101 @@ Example:
 
 ```text
 backups/
-└── 20260929-134225/
-    ├── terraform/
-    ├── archy/
+└── 20261010-080100/
+    ├── flow/
+    ├── ... other exported files and directories ...
     └── export-metadata.json
 ```
 
-Working export directories are cleaned on a new run. Existing timestamped backups are retained.
+The contents of `terraform/export/` are copied directly into the timestamped backup directory. The backup does **not** add `terraform/export/` as an extra directory layer.
+
+The timestamp uses the format `yyyyMMdd-HHmmss`. If a backup directory with that timestamp already exists, the script stops rather than overwriting it.
+
+The working `terraform/export/` directory is cleaned at the beginning of a run. Existing timestamped backups are retained and are not modified or deleted by later runs.
+
+## SHA-256 Integrity Verification
+
+After copying the export into the timestamped backup directory, the script calculates SHA-256 hashes for the source export files and their corresponding backup files.
+
+Validation compares the file manifests using relative paths, file sizes, and SHA-256 hashes. A missing file, unexpected file, size difference, or hash mismatch causes validation to fail.
+
+This verifies that the backed-up files match the files produced by that export run. It does not prove that the original export is correct, and it does not protect the metadata or backup from a person who can modify both the files and the verification records.
 
 ## Export Metadata
 
-Each backup contains:
+Each completed backup contains:
 
 ```text
 export-metadata.json
 ```
 
-The metadata records the export timestamps and duration, Terraform flow/resource counts, Archy exported/skipped counts, supported flow types, and the exported/skipped flow details.
+The metadata records export timing and duration, the export engine, export file counts, Architect YAML counts, and per-file integrity information including relative paths, file sizes, and SHA-256 hashes.
+
+The metadata is written at the root of the timestamped backup directory. It is not part of the Terraform export manifest being compared with the source export.
 
 ## Failure Behaviour
 
-A failure in Terraform, Archy, or backup validation causes the overall export to fail.
+A failure in Terraform initialisation, Terraform export, export validation, backup creation, or SHA-256 verification causes the overall run to fail.
 
-Existing timestamped backups are left untouched.
+Existing timestamped backups are left untouched. If a run fails after creating a new timestamped backup directory, that new directory may contain partial output; review it before deciding whether to remove it. The script does not delete prior backups.
 
-A failed run may leave partial content in the working export directories. These directories are cleaned at the beginning of the next run.
-
-## Special Characters in Flow Names
-
-Flow names are passed to Archy as the actual Genesys Cloud flow name. The name should not be sanitised before the Archy call, because changing it could prevent Archy from identifying the correct flow.
-
-Filename handling is separate from the flow name used for the Archy request.
+A failed run may leave partial content in the working export directory. That directory is cleaned at the beginning of the next run.
 
 ## New Customer Setup
 
-1. Create the customer repository from this project.
-2. Create/configure the Genesys Cloud OAuth client.
-3. Ensure the OAuth client has the permissions represented by `NTT-backup-Read-Only-Access`.
-4. Update `archy/config/options.yaml` with the Client ID and Client Secret.
-5. Update `terraform/oauth.auto.tfvars` with the Client ID and Client Secret.
-6. Configure the customer-specific Terraform settings.
-7. Confirm the bundled Terraform and Archy executables exist.
+1. Create a customer-specific copy of this project.
+2. Create or configure the Genesys Cloud OAuth client.
+3. Ensure the OAuth client has the read permissions required by the Terraform resources being exported.
+4. Update `terraform/oauth.auto.tfvars` with the customer's OAuth credentials and other required values.
+5. Configure the customer-specific Terraform settings.
+6. Confirm `tools/terraform/terraform.exe` exists.
+7. Confirm the Terraform export configuration uses `use_legacy_architect_flow_exporter = false`.
 8. Run:
 
-```powershell
-.\run-export.ps1
-```
+   ```powershell
+   .\run-export.ps1
+   ```
 
 9. Verify that a new timestamped directory exists under `backups/`.
-10. Review `export-metadata.json` for the export summary.
+10. Review `export-metadata.json` and confirm SHA-256 verification passed.
 
 ## Security
 
-The following files contain customer-specific OAuth credentials:
+The following file contains customer-specific OAuth credentials:
 
 ```text
-archy/config/options.yaml
 terraform/oauth.auto.tfvars
 ```
 
-Do not commit OAuth secrets to a public repository.
+Do not commit OAuth secrets to a public repository. Ensure `.gitignore` excludes this file and check that it is not already tracked by Git.
 
-The `backups/` directory contains exported customer Genesys Cloud configuration and should be treated as customer-confidential data.
+The `backups/` directory contains exported Genesys Cloud configuration and should be treated as customer-confidential data. Protect it with appropriate access controls and retention policies.
 
 ## Troubleshooting
 
 ### Terraform authentication fails
 
-Check `terraform/oauth.auto.tfvars` and verify the Client ID, Client Secret, Genesys Cloud region, and OAuth permissions.
+Check `terraform/oauth.auto.tfvars`. Verify the Client ID, Client Secret, Genesys Cloud region, and OAuth permissions.
 
-### Archy authentication fails
+### Terraform export fails
 
-Check `archy/config/options.yaml` and verify the Client ID and Client Secret.
+Review the Terraform error output and confirm the provider configuration, credentials, permissions, and customer-specific Terraform settings are correct.
 
-Remember that Terraform and Archy have separate configuration files.
+### SHA-256 backup validation fails
 
-### A flow is skipped
+The script compares the source and backup file manifests. Review the reported missing, unexpected, or mismatched files. Do not treat the backup as verified until the discrepancy is resolved. Existing timestamped backups should remain unchanged.
 
-Check the flow type in:
+### Backup directory already exists
 
-```text
-terraform/export/flow/genesyscloud_flow.tf.json
-```
-
-Only flow types configured in `$ArchySupportedFlowTypes` are passed to Archy. Skipped flows are recorded in `export-metadata.json`.
-
-### Backup validation fails
-
-Review the preceding export output for the first failure. Existing timestamped backups should remain unchanged.
+The script does not overwrite an existing timestamped backup. Run the script again when the timestamp differs, or investigate whether another run has already created that directory. Do not delete a backup unless you have confirmed it is safe to remove.
 
 ## Design Principles
 
-- Terraform is the source of truth for the Genesys Cloud configuration export.
-- Architect flows are exported through Archy.
-- Flow discovery is data-driven from the Terraform flow export.
+- Terraform is the only export engine used by this script.
+- Architect flows are exported as YAML directly by Terraform.
 - Working exports and historical backups are kept separate.
+- Exported files are copied directly into each timestamped backup directory.
 - Backups are timestamped and are not overwritten by later runs.
-- OAuth credentials are configured separately for Terraform and Archy.
-- The OAuth role used for backup access is read-only.
+- SHA-256 manifests verify that backup files match the source export files.
+- OAuth credentials and customer-specific configuration must not be committed to source control.
+- Backup files should be treated as customer-confidential data.

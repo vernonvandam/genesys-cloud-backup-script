@@ -1,27 +1,29 @@
-##Requires -Version 5.1
+#Requires -Version 5.1
 
 <#
 .SYNOPSIS
-    Exports Genesys Cloud configuration using Terraform and Architect flows using Archy,
-    then archives the completed exports into an immutable timestamped backup.
+    Exports Genesys Cloud configuration using Terraform, including Architect
+    flows as YAML, then archives the completed export into an immutable,
+    timestamped backup.
 
 .DESCRIPTION
-    Terraform is the source of truth for the Architect flows to be exported.
+    Terraform is responsible for exporting Genesys Cloud configuration and
+    Architect flows. Architect YAML export is enabled by setting
+    use_legacy_architect_flow_exporter = false in the Terraform export
+    configuration.
 
     The script:
-      1. Validates required executables, configuration and directories.
-      2. Cleans the working Terraform and Archy export directories.
-      3. Runs Terraform export.
-      4. Reads the exported genesyscloud_flow.tf.json.
-      5. Determines the Architect flows and their types from Terraform.
-      6. Exports each supported Architect flow using Archy.
-      7. Validates both export locations.
-      8. Creates an immutable timestamped backup.
-      9. Writes metadata describing the export.
+      1. Validates required Terraform files, executable and directories.
+      2. Cleans the working Terraform export directory.
+      3. Runs Terraform initialisation and export.
+      4. Validates the Terraform export, including generated YAML files.
+      5. Creates an immutable timestamped backup.
+      6. Validates the backup and writes export metadata.
 
 .NOTES
     Existing backups are never modified or deleted.
-    Working export directories are cleaned before every run.
+    The working Terraform export directory is cleaned before every run.
+    Archy is not required; Terraform exports Architect flows directly.
 #>
 
 Set-StrictMode -Version Latest
@@ -35,55 +37,8 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $TerraformDirectory = Join-Path $ProjectRoot "terraform"
 $TerraformExportDirectory = Join-Path $TerraformDirectory "export"
-
-$ArchyDirectory = Join-Path $ProjectRoot "archy"
-$ArchyExportDirectory = Join-Path $ArchyDirectory "export"
-$ArchyConfigDirectory = Join-Path $ArchyDirectory "config"
-$ArchyConfig = Join-Path $ArchyConfigDirectory "options.yaml"
-
 $TerraformExe = Join-Path $ProjectRoot "tools\terraform\terraform.exe"
-$ArchyExe = Join-Path $ProjectRoot "tools\archy\archy.exe"
-
 $BackupsDirectory = Join-Path $ProjectRoot "backups"
-
-$TerraformFlowJson = Join-Path `
-    $TerraformExportDirectory `
-    "flow\genesyscloud_flow.tf.json"
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-# Architect flow types that Archy should process.
-#
-# Terraform may export many different genesyscloud_flow resource types.
-# Not every flow/resource type is necessarily an Architect flow that Archy
-# can export.
-#
-# Add additional types here when they are confirmed to be supported by Archy.
-$ArchySupportedFlowTypes = @(
-    "inboundcall",
-    "inqueuecall",
-    "outboundcall",
-    "securecall",
-    "voicemail",
-    "emailsend",
-    "businessprocess",
-    "inboundchat",
-    "inboundemail",
-    "inboundshortmessage",
-    "inqueueemail",
-    "inqueueshortmessage",
-    "surveyinvite",
-    "workflow",
-    "workitem",
-    "bot",
-    "digitalbot",
-    "voice",
-    "voicesurvey",
-    "commonmodule"
-)
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -96,13 +51,10 @@ function Write-Step {
     )
 
     Write-Host ""
-    Write-Host "================================================================" `
-        -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host $Message -ForegroundColor Cyan
-    Write-Host "================================================================" `
-        -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
 }
-
 
 function Write-Success {
     param (
@@ -113,7 +65,6 @@ function Write-Success {
     Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
-
 function Write-WarningMessage {
     param (
         [Parameter(Mandatory = $true)]
@@ -122,7 +73,6 @@ function Write-WarningMessage {
 
     Write-Host "[WARNING] $Message" -ForegroundColor Yellow
 }
-
 
 function Write-Info {
     param (
@@ -133,7 +83,6 @@ function Write-Info {
     Write-Host "[INFO] $Message" -ForegroundColor Gray
 }
 
-
 function Write-Failure {
     param (
         [Parameter(Mandatory = $true)]
@@ -142,7 +91,6 @@ function Write-Failure {
 
     Write-Host "[FAILED] $Message" -ForegroundColor Red
 }
-
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -164,7 +112,6 @@ function Test-RequiredFile {
     Write-Success "$Description found."
 }
 
-
 function Test-RequiredDirectory {
     param (
         [Parameter(Mandatory = $true)]
@@ -181,7 +128,6 @@ function Test-RequiredDirectory {
     Write-Success "$Description found."
 }
 
-
 function Remove-WorkingDirectory {
     param (
         [Parameter(Mandatory = $true)]
@@ -197,125 +143,14 @@ function Remove-WorkingDirectory {
     }
 
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
-
     Write-Success "$Description prepared."
 }
-
-
-# ---------------------------------------------------------------------------
-# Terraform flow discovery
-# ---------------------------------------------------------------------------
-
-function Get-ArchyFlowsFromTerraformExport {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$TerraformFlowJsonPath
-    )
-
-    if (-not (Test-Path -LiteralPath $TerraformFlowJsonPath -PathType Leaf)) {
-        throw "Terraform flow export JSON was not found: $TerraformFlowJsonPath"
-    }
-
-    Write-Info "Reading Terraform flow export:"
-    Write-Info $TerraformFlowJsonPath
-
-    try {
-        $TerraformFlowJson = Get-Content `
-            -LiteralPath $TerraformFlowJsonPath `
-            -Raw `
-            -Encoding UTF8 |
-            ConvertFrom-Json
-    }
-    catch {
-        throw "Unable to parse Terraform flow export JSON '$TerraformFlowJsonPath'. $($_.Exception.Message)"
-    }
-
-    if ($null -eq $TerraformFlowJson.resource) {
-        throw "The Terraform flow export does not contain a 'resource' section."
-    }
-
-    if ($null -eq $TerraformFlowJson.resource.genesyscloud_flow) {
-        throw "The Terraform flow export does not contain any 'genesyscloud_flow' resources."
-    }
-
-    $FlowResources = $TerraformFlowJson.resource.genesyscloud_flow
-
-    $Flows = @()
-
-    foreach ($Resource in $FlowResources.PSObject.Properties) {
-
-        $ResourceName = $Resource.Name
-        $Flow = $Resource.Value
-
-        if ($null -eq $Flow) {
-            Write-WarningMessage `
-                "Skipping Terraform flow resource '$ResourceName' because it contains no value."
-
-            continue
-        }
-
-        if ([string]::IsNullOrWhiteSpace([string]$Flow.name)) {
-            Write-WarningMessage `
-                "Skipping Terraform flow resource '$ResourceName' because it has no name."
-
-            continue
-        }
-
-        if ([string]::IsNullOrWhiteSpace([string]$Flow.type)) {
-            Write-WarningMessage `
-                "Skipping Terraform flow '$($Flow.name)' because it has no type."
-
-            continue
-        }
-
-        $FlowType = ([string]$Flow.type).ToLowerInvariant()
-
-        $Flows += [PSCustomObject]@{
-            ResourceName = $ResourceName
-            Name         = [string]$Flow.name
-            Type         = $FlowType
-        }
-    }
-
-    if ($Flows.Count -eq 0) {
-        throw "No valid genesyscloud_flow resources were found in '$TerraformFlowJsonPath'."
-    }
-
-    return $Flows
-}
-
-
-function Get-ArchyExportableFlows {
-    param (
-        [Parameter(Mandatory = $true)]
-        [array]$Flows
-    )
-
-    $ExportableFlows = @()
-    $SkippedFlows = @()
-
-    foreach ($Flow in $Flows) {
-
-        if ($ArchySupportedFlowTypes -contains $Flow.Type) {
-            $ExportableFlows += $Flow
-        }
-        else {
-            $SkippedFlows += $Flow
-        }
-    }
-
-    return [PSCustomObject]@{
-        Exportable = $ExportableFlows
-        Skipped    = $SkippedFlows
-    }
-}
-
 
 # ---------------------------------------------------------------------------
 # Export validation
 # ---------------------------------------------------------------------------
 
-function Test-ExportDirectory {
+function Get-ExportFiles {
     param (
         [Parameter(Mandatory = $true)]
         [string]$Path,
@@ -329,11 +164,7 @@ function Test-ExportDirectory {
     }
 
     $Files = @(
-        Get-ChildItem `
-            -LiteralPath $Path `
-            -Recurse `
-            -File `
-            -ErrorAction Stop
+        Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction Stop
     )
 
     if ($Files.Count -eq 0) {
@@ -341,8 +172,85 @@ function Test-ExportDirectory {
     }
 
     Write-Success "$Description contains $($Files.Count) file(s)."
+    return $Files
 }
 
+
+function Get-FileHashManifest {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory = $true)]
+        [array]$Files
+    )
+
+    $ResolvedRoot = (Resolve-Path -LiteralPath $RootPath).Path.TrimEnd([char[]]@('\', '/'))
+    $Manifest = @(
+        foreach ($File in $Files) {
+            $FullPath = (Resolve-Path -LiteralPath $File.FullName).Path
+            $RelativePath = $FullPath.Substring($ResolvedRoot.Length).TrimStart([char[]]@('\', '/'))
+            $Hash = Get-FileHash -LiteralPath $FullPath -Algorithm SHA256 -ErrorAction Stop
+
+            [PSCustomObject]@{
+                RelativePath = $RelativePath.Replace('\', '/')
+                SHA256       = $Hash.Hash
+                Length       = [long]$File.Length
+            }
+        }
+    )
+
+    return $Manifest
+}
+
+function Compare-FileHashManifests {
+    param (
+        [Parameter(Mandatory = $true)]
+        [array]$SourceManifest,
+
+        [Parameter(Mandatory = $true)]
+        [array]$BackupManifest
+    )
+
+    $SourceByPath = @{}
+    foreach ($Entry in $SourceManifest) {
+        $SourceByPath[$Entry.RelativePath] = $Entry
+    }
+
+    $BackupByPath = @{}
+    foreach ($Entry in $BackupManifest) {
+        $BackupByPath[$Entry.RelativePath] = $Entry
+    }
+
+    $Errors = @()
+
+    foreach ($RelativePath in $SourceByPath.Keys) {
+        if (-not $BackupByPath.ContainsKey($RelativePath)) {
+            $Errors += "Missing from backup: $RelativePath"
+            continue
+        }
+
+        if ($SourceByPath[$RelativePath].SHA256 -ne $BackupByPath[$RelativePath].SHA256) {
+            $Errors += "SHA-256 mismatch: $RelativePath"
+        }
+
+        if ($SourceByPath[$RelativePath].Length -ne $BackupByPath[$RelativePath].Length) {
+            $Errors += "File size mismatch: $RelativePath"
+        }
+    }
+
+    foreach ($RelativePath in $BackupByPath.Keys) {
+        if (-not $SourceByPath.ContainsKey($RelativePath)) {
+            $Errors += "Unexpected file in backup: $RelativePath"
+        }
+    }
+
+    if ($Errors.Count -gt 0) {
+        throw "Backup content verification failed:`n - $($Errors -join "`n - ")"
+    }
+
+    Write-Success "SHA-256 verification passed for $($SourceManifest.Count) file(s)."
+}
 
 # ---------------------------------------------------------------------------
 # Metadata
@@ -360,53 +268,36 @@ function Write-ExportMetadata {
         [datetime]$EndTime,
 
         [Parameter(Mandatory = $true)]
-        [array]$TerraformFlows,
+        [array]$ExportFiles,
 
         [Parameter(Mandatory = $true)]
-        [array]$ExportedFlows,
-
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [array]$SkippedFlows
+        [array]$FileManifest
     )
 
     $MetadataPath = Join-Path $BackupDirectory "export-metadata.json"
+    $YamlFiles = @($ExportFiles | Where-Object { $_.Extension -ieq ".yaml" -or $_.Extension -ieq ".yml" })
 
     $Metadata = [PSCustomObject]@{
         ExportTimestamp = $EndTime.ToString("o")
         StartTime       = $StartTime.ToString("o")
         EndTime         = $EndTime.ToString("o")
-        DurationSeconds = [math]::Round(
-            ($EndTime - $StartTime).TotalSeconds,
-            2
-        )
-
-        Terraform = [PSCustomObject]@{
-            FlowResourceCount = $TerraformFlows.Count
+        DurationSeconds = [math]::Round(($EndTime - $StartTime).TotalSeconds, 2)
+        ExportEngine    = "Terraform"
+        Terraform       = [PSCustomObject]@{
+            ExportFileCount    = $ExportFiles.Count
+            ArchitectYamlCount = $YamlFiles.Count
         }
-
-        Archy = [PSCustomObject]@{
-            ExportedFlowCount = $ExportedFlows.Count
-            SkippedFlowCount  = $SkippedFlows.Count
-            SupportedTypes    = @($ArchySupportedFlowTypes)
+        Integrity        = [PSCustomObject]@{
+            Algorithm       = "SHA256"
+            Verification    = "Passed"
+            VerifiedFileCount = $FileManifest.Count
         }
-
-        ExportedFlows = @(
-            foreach ($Flow in $ExportedFlows) {
+        Files = @(
+            foreach ($Entry in $FileManifest) {
                 [PSCustomObject]@{
-                    ResourceName = $Flow.ResourceName
-                    Name         = $Flow.Name
-                    Type         = $Flow.Type
-                }
-            }
-        )
-
-        SkippedFlows = @(
-            foreach ($Flow in $SkippedFlows) {
-                [PSCustomObject]@{
-                    ResourceName = $Flow.ResourceName
-                    Name         = $Flow.Name
-                    Type         = $Flow.Type
+                    Path   = $Entry.RelativePath
+                    SHA256 = $Entry.SHA256
+                    SizeBytes = $Entry.Length
                 }
             }
         )
@@ -419,7 +310,6 @@ function Write-ExportMetadata {
     Write-Success "Export metadata written."
 }
 
-
 # ---------------------------------------------------------------------------
 # Main export process
 # ---------------------------------------------------------------------------
@@ -427,7 +317,6 @@ function Write-ExportMetadata {
 $StartTime = Get-Date
 
 try {
-
     Write-Host ""
     Write-Host "Genesys Cloud Customer Export" -ForegroundColor White
     Write-Host "Project: $ProjectRoot" -ForegroundColor Gray
@@ -437,375 +326,167 @@ try {
     # 1. Validate prerequisites
     # -----------------------------------------------------------------------
 
-    Write-Step "1/8 Validating prerequisites"
+    Write-Step "1/6 Validating prerequisites"
 
-    Test-RequiredFile `
-        -Path $TerraformExe `
-        -Description "Terraform executable"
+    Test-RequiredFile -Path $TerraformExe -Description "Terraform executable"
+    Test-RequiredDirectory -Path $TerraformDirectory -Description "Terraform directory"
 
-    Test-RequiredFile `
-        -Path $ArchyExe `
-        -Description "Archy executable"
-
-    Test-RequiredFile `
-        -Path $ArchyConfig `
-        -Description "Archy configuration"
-
-    Test-RequiredDirectory `
-        -Path $TerraformDirectory `
-        -Description "Terraform directory"
-
-    Test-RequiredDirectory `
-        -Path $ArchyDirectory `
-        -Description "Archy directory"
-
-    if (-not (Test-Path -LiteralPath $BackupsDirectory)) {
-        New-Item `
-            -ItemType Directory `
-            -Path $BackupsDirectory `
-            -Force |
-            Out-Null
+    if (-not (Test-Path -LiteralPath $BackupsDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $BackupsDirectory -Force | Out-Null
     }
 
     Write-Success "All prerequisites validated."
 
-
     # -----------------------------------------------------------------------
-    # 2. Clean working export directories
+    # 2. Clean working Terraform export directory
     # -----------------------------------------------------------------------
 
-    Write-Step "2/8 Preparing working export directories"
+    Write-Step "2/6 Preparing Terraform export directory"
 
     Remove-WorkingDirectory `
         -Path $TerraformExportDirectory `
         -Description "Terraform export directory"
 
-    Remove-WorkingDirectory `
-        -Path $ArchyExportDirectory `
-        -Description "Archy export directory"
-
-
     # -----------------------------------------------------------------------
-    # 3. Terraform export
+    # 3. Run Terraform export
     # -----------------------------------------------------------------------
 
-    Write-Step "3/8 Running Terraform export"
+    Write-Step "3/6 Running Terraform export"
 
     Push-Location $TerraformDirectory
-
     try {
-
         & $TerraformExe init
-
         if ($LASTEXITCODE -ne 0) {
             throw "Terraform init failed with exit code $LASTEXITCODE."
         }
-
         Write-Success "Terraform initialized."
 
         & $TerraformExe apply -auto-approve
-
         if ($LASTEXITCODE -ne 0) {
             throw "Terraform export failed with exit code $LASTEXITCODE."
         }
-
         Write-Success "Terraform export completed."
-
     }
     finally {
         Pop-Location
     }
 
-
     # -----------------------------------------------------------------------
-    # 4. Discover Architect flows from Terraform export
-    # -----------------------------------------------------------------------
-
-    Write-Step "4/8 Discovering Architect flows from Terraform export"
-
-    if (-not (Test-Path `
-        -LiteralPath $TerraformFlowJson `
-        -PathType Leaf)) {
-
-        throw "Terraform flow export was not generated: $TerraformFlowJson"
-    }
-
-    $TerraformFlows = @(
-        Get-ArchyFlowsFromTerraformExport `
-            -TerraformFlowJsonPath $TerraformFlowJson
-    )
-
-    Write-Success `
-        "Found $($TerraformFlows.Count) flow resource(s) in Terraform export."
-
-    $FlowClassification = Get-ArchyExportableFlows `
-        -Flows $TerraformFlows
-
-    $ExportableFlows = @($FlowClassification.Exportable)
-    $SkippedFlows = @($FlowClassification.Skipped)
-
-    Write-Host ""
-    Write-Host "Terraform flow discovery summary:" `
-        -ForegroundColor White
-
-    Write-Host "  Total resources : $($TerraformFlows.Count)"
-    Write-Host "  Archy exports   : $($ExportableFlows.Count)"
-    Write-Host "  Skipped         : $($SkippedFlows.Count)"
-
-    if ($SkippedFlows.Count -gt 0) {
-
-        Write-Host ""
-        Write-WarningMessage "The following Terraform flow resources are not configured for Archy export:"
-
-        foreach ($Flow in $SkippedFlows) {
-            Write-Host "  - $($Flow.Name) [$($Flow.Type)]"
-        }
-    }
-
-
-    # -----------------------------------------------------------------------
-    # 5. Archy flow export
+    # 4. Validate Terraform export
     # -----------------------------------------------------------------------
 
-    Write-Step "5/8 Exporting Architect flows with Archy"
+    Write-Step "4/6 Validating Terraform export"
 
-    if ($ExportableFlows.Count -eq 0) {
-
-        Write-WarningMessage `
-            "No Terraform flows match the configured Archy-supported flow types."
-
-    }
-    else {
-
-        $ExportedFlows = @()
-
-        foreach ($Flow in $ExportableFlows) {
-
-            Write-Host ""
-            Write-Host "Exporting flow:" -ForegroundColor Yellow
-            Write-Host "  Resource : $($Flow.ResourceName)"
-            Write-Host "  Name     : $($Flow.Name)"
-            Write-Host "  Type     : $($Flow.Type)"
-            Write-Host ""
-
-            & $ArchyExe export `
-                --flowName $Flow.Name `
-                --flowType $Flow.Type `
-                --optionsFile $ArchyConfig `
-                --exportType yaml `
-                --outputDir $ArchyExportDirectory `
-                --debug `
-                --force
-
-            if ($LASTEXITCODE -ne 0) {
-                throw `
-                    "Archy export failed for flow '$($Flow.Name)' " +
-                    "($($Flow.Type)) with exit code $LASTEXITCODE."
-            }
-
-            # Prefix the Archy-generated YAML filename with the flow type.
-            $ArchyYamlFiles = Get-ChildItem -Path $ArchyExportDirectory -Filter "*.yaml" -File
-
-            foreach ($YamlFile in $ArchyYamlFiles) {
-                if ($YamlFile.BaseName -like "$($Flow.Name)*") {
-                    $NewName = "{0}_{1}{2}" -f $Flow.Type, $YamlFile.BaseName, $YamlFile.Extension
-                    Rename-Item -LiteralPath $YamlFile.FullName -NewName $NewName
-                    break
-                }
-            }
-
-            $ExportedFlows += $Flow
-            Write-Success "Exported: $($Flow.Name)"
-
-        }
-    }
-
-
-    # -----------------------------------------------------------------------
-    # 6. Validate exports
-    # -----------------------------------------------------------------------
-
-    Write-Step "6/8 Validating generated exports"
-
-    Test-ExportDirectory `
+    $ExportFiles = @(Get-ExportFiles `
         -Path $TerraformExportDirectory `
-        -Description "Terraform export"
+        -Description "Terraform export")
 
-    if ($ExportableFlows.Count -gt 0) {
-
-        Test-ExportDirectory `
-            -Path $ArchyExportDirectory `
-            -Description "Archy export"
-    }
-    else {
-
-        Write-Info `
-            "No Archy export validation required because no supported flows were found."
-    }
-
-    Write-Success "Export validation completed."
-
+    $YamlFiles = @($ExportFiles | Where-Object { $_.Extension -ieq ".yaml" -or $_.Extension -ieq ".yml" })
+    Write-Info "Architect YAML files found: $($YamlFiles.Count)"
+    Write-Success "Terraform export validation completed."
 
     # -----------------------------------------------------------------------
-    # 7. Create immutable backup
+    # 5. Create immutable timestamped backup
     # -----------------------------------------------------------------------
 
-    Write-Step "7/8 Creating timestamped backup"
+    Write-Step "5/6 Creating timestamped backup"
 
     $EndTime = Get-Date
-
     $BackupTimestamp = $EndTime.ToString("yyyyMMdd-HHmmss")
-
-    $BackupDirectory = Join-Path `
-        $BackupsDirectory `
-        $BackupTimestamp
+    $BackupDirectory = Join-Path $BackupsDirectory $BackupTimestamp
 
     if (Test-Path -LiteralPath $BackupDirectory) {
-        throw `
-            "Backup directory already exists. " +
-            "The existing backup will not be overwritten: $BackupDirectory"
+        throw "Backup directory already exists. The existing backup will not be overwritten: $BackupDirectory"
     }
 
-    New-Item `
-        -ItemType Directory `
-        -Path $BackupDirectory `
-        -Force |
-        Out-Null
+    New-Item -ItemType Directory -Path $BackupDirectory -Force | Out-Null
 
-    $BackupTerraformDirectory = Join-Path `
-        $BackupDirectory `
-        "terraform"
-
-    $BackupArchyDirectory = Join-Path `
-        $BackupDirectory `
-        "archy"
-
-    New-Item `
-        -ItemType Directory `
-        -Path $BackupTerraformDirectory `
-        -Force |
-        Out-Null
-
-    New-Item `
-        -ItemType Directory `
-        -Path $BackupArchyDirectory `
-        -Force |
-        Out-Null
-
-    # Copy Terraform export
-    Copy-Item `
-        -LiteralPath $TerraformExportDirectory `
-        -Destination $BackupTerraformDirectory `
-        -Recurse `
-        -Force
-
-    # Copy Archy export when one exists
-    if ($ExportableFlows.Count -gt 0) {
-
-        Copy-Item `
-            -LiteralPath $ArchyExportDirectory `
-            -Destination $BackupArchyDirectory `
-            -Recurse `
-            -Force
-    }
+    # Copy the contents of the Terraform export directly into the timestamped
+    # backup directory. This avoids an unnecessary terraform\export hierarchy.
+    Get-ChildItem -LiteralPath $TerraformExportDirectory -Force |
+        Copy-Item -Destination $BackupDirectory -Recurse -Force
 
     Write-Success "Backup created: $BackupDirectory"
 
-
     # -----------------------------------------------------------------------
-    # 8. Validate backup and write metadata
+    # 6. Validate backup and write metadata
     # -----------------------------------------------------------------------
 
-    Write-Step "8/8 Validating backup"
+    Write-Step "6/6 Validating backup"
 
-    $BackupTerraformExport = Join-Path `
-        $BackupDirectory `
-        "terraform\export"
+    # Export files are stored directly in the timestamped backup directory.
+    # Metadata is written only after file verification, so it is not included
+    # in the source-export-versus-backup manifest comparison.
+    $BackupExportDirectory = $BackupDirectory
+    $BackupFiles = @(Get-ExportFiles `
+        -Path $BackupExportDirectory `
+        -Description "Backed-up Terraform export")
 
-    if (-not (Test-Path `
-        -LiteralPath $BackupTerraformExport `
-        -PathType Container)) {
-
-        throw `
-            "Terraform export was not copied correctly to backup: " +
-            "$BackupTerraformExport"
+    if ($BackupFiles.Count -ne $ExportFiles.Count) {
+        throw "Backup validation failed: source has $($ExportFiles.Count) file(s), but backup has $($BackupFiles.Count) file(s)."
     }
 
-    if ($ExportableFlows.Count -gt 0) {
-
-        $BackupArchyExport = Join-Path `
-            $BackupDirectory `
-            "archy\export"
-
-        if (-not (Test-Path `
-            -LiteralPath $BackupArchyExport `
-            -PathType Container)) {
-
-            throw `
-                "Archy export was not copied correctly to backup: " +
-                "$BackupArchyExport"
-        }
+    $BackupYamlFiles = @($BackupFiles | Where-Object { $_.Extension -ieq ".yaml" -or $_.Extension -ieq ".yml" })
+    if ($BackupYamlFiles.Count -ne $YamlFiles.Count) {
+        throw "Backup validation failed: source has $($YamlFiles.Count) YAML file(s), but backup has $($BackupYamlFiles.Count) YAML file(s)."
     }
+
+    Write-Info "Calculating SHA-256 hashes for source export files..."
+    $SourceManifest = @(
+        Get-FileHashManifest `
+            -RootPath $TerraformExportDirectory `
+            -Files $ExportFiles
+    )
+
+    Write-Info "Calculating SHA-256 hashes for backup files..."
+    $BackupManifest = @(
+        Get-FileHashManifest `
+            -RootPath $BackupExportDirectory `
+            -Files $BackupFiles
+    )
+
+    Compare-FileHashManifests `
+        -SourceManifest $SourceManifest `
+        -BackupManifest $BackupManifest
 
     Write-ExportMetadata `
         -BackupDirectory $BackupDirectory `
         -StartTime $StartTime `
-        -EndTime $EndTime `
-        -TerraformFlows $TerraformFlows `
-        -ExportedFlows $ExportedFlows `
-        -SkippedFlows $SkippedFlows
+        -EndTime (Get-Date) `
+        -ExportFiles $ExportFiles `
+        -FileManifest $SourceManifest
 
     Write-Success "Backup validation completed."
-
 
     # -----------------------------------------------------------------------
     # Completion
     # -----------------------------------------------------------------------
 
-    $EndTime = Get-Date
+    $CompletionTime = Get-Date
 
     Write-Host ""
-    Write-Host "================================================================" `
-        -ForegroundColor Green
-    Write-Host "EXPORT COMPLETED SUCCESSFULLY" `
-        -ForegroundColor Green
-    Write-Host "================================================================" `
-        -ForegroundColor Green
-
+    Write-Host "================================================================" -ForegroundColor Green
+    Write-Host "EXPORT COMPLETED SUCCESSFULLY" -ForegroundColor Green
+    Write-Host "================================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Backup:"
     Write-Host "  $BackupDirectory"
-
     Write-Host ""
-    Write-Host "Terraform flows discovered:"
-    Write-Host "  $($TerraformFlows.Count)"
-
-    Write-Host ""
-    Write-Host "Archy flows exported:"
-    Write-Host "  $($ExportedFlows.Count)"
-
-    Write-Host ""
-    Write-Host "Flows skipped:"
-    Write-Host "  $($SkippedFlows.Count)"
-
-    Write-Host ""
+    Write-Host "Terraform export files:"
+    Write-Host "  $($ExportFiles.Count)"
+    Write-Host "Architect YAML files:"
+    Write-Host "  $($YamlFiles.Count)"
     Write-Host "Duration:"
-    Write-Host "  $([math]::Round(($EndTime - $StartTime).TotalSeconds, 2)) seconds"
+    Write-Host "  $([math]::Round(($CompletionTime - $StartTime).TotalSeconds, 2)) seconds"
     Write-Host ""
-
 }
 catch {
-
     Write-Host ""
     Write-Failure "EXPORT FAILED"
     Write-Host ""
     Write-Host $_.Exception.Message -ForegroundColor Red
     Write-Host ""
-
-    Write-Host "Existing backups have not been modified." `
-        -ForegroundColor Yellow
-
+    Write-Host "Existing backups have not been modified." -ForegroundColor Yellow
     Write-Host ""
-
     exit 1
 }
